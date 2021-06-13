@@ -1,4 +1,4 @@
-module rsocks-go
+module rsocks
 
 go 1.13
 
