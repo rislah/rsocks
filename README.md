@@ -1,6 +1,4 @@
 # Example usage
-`go get -u github.com/rislah/rsocks`
-
 ```
 package main
 
