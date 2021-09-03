@@ -1,6 +1,7 @@
 package rsocks
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -11,13 +12,26 @@ import (
 )
 
 /*
+package main
+
+import (
+	"fmt"
+	"github.com/rislah/rsocks"
+	"io/ioutil"
+	"log"
+	"net/http"
+	"time"
+)
+
+
 func main() {
-	socks, err := rsocks.New("127.0.0.1:1080", 2*time.Second)
+	socks, err := rsocks.New("80.211.165.175:48484", 10*time.Second, rsocks.Socks5)
 	if err != nil {
 		log.Fatal(err)
 	}
+	fmt.Println(socks)
 	tr := &http.Transport{
-		Dial: socks.Dialer(),
+		DialContext: socks.Dialer(),
 	}
 
 	client := &http.Client{
@@ -39,7 +53,6 @@ func main() {
 	fmt.Println(string(body))
 }
 */
-type socksConnectionFunc func(net.Conn, string, time.Duration) error
 
 const (
 	socks4Version  = 0x04
@@ -55,21 +68,21 @@ var (
 type socksVersion int
 
 const (
-	SOCKS4 socksVersion = iota
-	SOCKS5
+	Socks4 socksVersion = iota
+	Socks5
 )
 
-type replyCode byte
+type socks4ReplyCode byte
 
 const (
-	requestGranted                         replyCode = 0x5A
-	requestRejectedOrFailed                          = 0x5B
-	requestRejectedIntendConnectionFailure           = 0x5C
-	requestRejectedUserIDMismatch                    = 0x5D
+	requestGranted                         socks4ReplyCode = 0x5A
+	requestRejectedOrFailed                                = 0x5B
+	requestRejectedIntendConnectionFailure                 = 0x5C
+	requestRejectedUserIDMismatch                          = 0x5D
 )
 
-func (r replyCode) toString() string {
-	switch r {
+func (code socks4ReplyCode) toString() string {
+	switch code {
 	case requestGranted:
 		return "request granted"
 	case requestRejectedOrFailed:
@@ -83,51 +96,141 @@ func (r replyCode) toString() string {
 	}
 }
 
-type rsocks struct {
-	address string
-	timeout time.Duration
+type socks5ReplyCode byte
+
+const (
+	accessGranted                      socks5ReplyCode = 0x00
+	generalFailure                                     = 0x01
+	connectionNotAllowedByRuleset                      = 0x02
+	networkUnreachable                                 = 0x03
+	hostUnreachable                                    = 0x04
+	connectionRefusedByDestinationHost                 = 0x05
+	TTLExpired                                         = 0x06
+	commandNotSupportedOrProtocolError                 = 0x07
+	addressTypeNotSupported                            = 0x08
+	to0xFFUnassigned                                   = 0x09
+)
+
+func (code socks5ReplyCode) toString() string {
+	switch code {
+	case accessGranted:
+		return "access granted"
+	case generalFailure:
+		return "general SOCKS server failure"
+	case connectionNotAllowedByRuleset:
+		return "connection not allowed by ruleset"
+	case networkUnreachable:
+		return "Network unreachable"
+	case hostUnreachable:
+		return "Host unreachable"
+	case connectionRefusedByDestinationHost:
+		return "Connection refused"
+	case TTLExpired:
+		return "TTL expired"
+	case commandNotSupportedOrProtocolError:
+		return "Command not supported"
+	case addressTypeNotSupported:
+		return "Address type not supported"
+	case to0xFFUnassigned:
+		return "to X'FF' unassigned"
+	default:
+		return "request failed, unknown reply code"
+	}
 }
 
-func New(address string, timeout time.Duration) (rsocks, error) {
-	err := validateProxyAddress(address)
-	if err != nil {
-		return rsocks{}, err
+type socks5AddressType byte
+
+const (
+	Ipv4       socks5AddressType = 0x01
+	DomainName                   = 0x03
+	Ipv6                         = 0x04
+)
+
+type socks5AuthType byte
+
+const (
+	NoAuth   socks5AuthType = 0x00
+	UserPass                = 0x02
+)
+
+type RSocks struct {
+	address            string
+	timeout            time.Duration
+	version            socksVersion
+	addressType        socks5AddressType
+	authenticationType socks5AuthType
+	username           string
+	password           string
+}
+
+func New(address string, timeout time.Duration, version socksVersion) (RSocks, error) {
+	if err := validateProxyAddress(address); err != nil {
+		return RSocks{}, err
 	}
-	return rsocks{
-		address, timeout,
+	return RSocks{
+		address,
+		timeout,
+		version,
+		DomainName,
+		NoAuth,
+		"",
+		"",
 	}, nil
 }
 
-func (r rsocks) Dialer() func(string, string) (net.Conn, error) {
-	dialer := func(network, addr string) (net.Conn, error) {
-		var d net.Dialer
-		d.Timeout = r.timeout
+func (r RSocks) SetUsername(username string) {
+	r.username = username
+}
 
-		conn, err := d.Dial("tcp", addr)
+func (r RSocks) SetPassword(password string) {
+	r.password = password
+}
+
+func (r RSocks) SetSocks5AddressType(addrType socks5AddressType) {
+	r.addressType = addrType
+}
+
+func (r RSocks) Dialer() func(context.Context, string, string) (net.Conn, error) {
+	dialer := func(parentCtx context.Context, network, reqAddr string) (net.Conn, error) {
+		var d net.Dialer
+		ctx, _ := context.WithTimeout(parentCtx, r.timeout)
+		conn, err := d.DialContext(ctx, "tcp", r.address)
 		if err != nil {
 			return nil, err
 		}
 
-		if err := r.socks4Connect(conn, addr); err != nil {
-			return nil, err
+		switch r.version {
+		case Socks4:
+			if err := r.socks4Connect(conn, reqAddr); err != nil {
+				return nil, err
+			}
+			return conn, nil
+		case Socks5:
+			if err := r.socks5Connect(conn, reqAddr); err != nil {
+				return nil, err
+			}
+			return conn, nil
+		default:
+			return nil, errors.New("Unsupported SOCKS version")
 		}
-
-		return conn, nil
 	}
 	return dialer
 }
 
-func (r rsocks) socks4Connect(conn net.Conn, address string) error {
-	host, port, err := splitHostPort(address)
+func (r RSocks) socks4Connect(conn net.Conn, reqAddr string) error {
+	host, port, err := splitHostPort(reqAddr)
 	if err != nil {
 		return err
 	}
 
 	defer func() {
-		conn.SetDeadline(time.Time{}) // resets the deadline, so future read/writes on conn wont time out
+		err := conn.SetDeadline(time.Time{})
+		if err != nil {
+			return
+		} // resets deadlines, so future read/writes on conn wont be timed out
 	}()
 
-	ip, err := lookupIP(host, SOCKS4)
+	ip, err := r.lookupIP(host)
 	if err != nil {
 		return err
 	}
@@ -148,25 +251,135 @@ func (r rsocks) socks4Connect(conn net.Conn, address string) error {
 	if err := conn.SetReadDeadline(time.Now().Add(r.timeout)); err != nil {
 		return err
 	}
+
 	request = request[:8]
 	if _, err = io.ReadFull(conn, request); err != nil {
 		return err
 	}
 
-	if code := replyCode(request[1]); code != requestGranted {
+	if code := socks4ReplyCode(request[1]); code != requestGranted {
 		return fmt.Errorf(code.toString())
 	}
 
 	return nil
 }
 
-func lookupIP(host string, version socksVersion) (net.IP, error) {
+func (r RSocks) socks5Connect(conn net.Conn, reqAddr string) error {
+	defer func() {
+		err := conn.SetDeadline(time.Time{})
+		if err != nil {
+			return
+		} // resets deadlines, so future read/writes on conn wont be timed out
+	}()
+
+	greeting := make([]byte, 0, 3)
+	greeting = append(greeting, 5, 1, byte(r.authenticationType)) // version, number of authentication methods supported, auth type
+	if err := r.write(conn, greeting); err != nil {
+		return err
+	}
+
+	serverChoice := make([]byte, 2)
+	if err := r.read(conn, serverChoice); err != nil {
+		return nil
+	}
+
+	if serverChoice[0] != 5 {
+		return fmt.Errorf("unsupported server version, got: %d", serverChoice[0])
+	}
+
+	if authType := socks5AuthType(serverChoice[1]); authType != r.authenticationType {
+		return fmt.Errorf("unsupported auth type, got: %d", serverChoice[1])
+	}
+
+	if r.authenticationType == UserPass {
+		authenticationRequest := make([]byte, 3+len(r.username)+len(r.password))
+		authenticationRequest = append(authenticationRequest, 1, byte(len(r.username)))
+		authenticationRequest = append(authenticationRequest, []byte(r.username)...)
+		authenticationRequest = append(authenticationRequest, byte(len(r.password)))
+		authenticationRequest = append(authenticationRequest, []byte(r.password)...)
+		if err := r.write(conn, authenticationRequest); err != nil {
+			return err
+		}
+		serverResponse := make([]byte, 2)
+		if err := r.read(conn, serverResponse); err != nil {
+			return err
+		}
+		if serverResponse[1] != 0 {
+			return fmt.Errorf("authentication failed")
+		}
+	}
+
+	host, port, err := splitHostPort(reqAddr)
+	if err != nil {
+		return err
+	}
+
+	var connectionRequest []byte
+
+	switch r.addressType {
+	case DomainName:
+		connectionRequest = make([]byte, 0, 6+len(host)+1)
+		connectionRequest = append(connectionRequest, 5, 1, 0, 3, byte(len(host)))
+		connectionRequest = append(connectionRequest, []byte(host)...)
+		connectionRequest = append(connectionRequest, byte(port>>8), byte(port))
+	case Ipv4:
+		ip, err := r.lookupIP(host)
+		if err != nil {
+			return err
+		}
+		connectionRequest = make([]byte, 0, 10)
+		connectionRequest = append(connectionRequest, 5, 1, 0, 1)                 // version, connect, authtype, domaintype
+		connectionRequest = append(connectionRequest, ip[0], ip[1], ip[2], ip[3]) //  ip
+		connectionRequest = append(connectionRequest, byte(port>>8), byte(port))  // big endian port
+	}
+
+	if len(connectionRequest) == 0 {
+		return nil
+	}
+
+	if err := r.write(conn, connectionRequest); err != nil {
+		return err
+	}
+
+	response := make([]byte, 10)
+	if err := r.read(conn, response); err != nil {
+		return err
+	}
+
+	if code := socks5ReplyCode(response[1]); code != accessGranted {
+		return fmt.Errorf(code.toString())
+	}
+
+	return nil
+}
+
+func (r RSocks) write(conn net.Conn, buf []byte) error {
+	if err := conn.SetWriteDeadline(time.Now().Add(r.timeout)); err != nil {
+		return err
+	}
+	if _, err := conn.Write(buf); err != nil {
+		return err
+	}
+	return nil
+}
+
+func (r RSocks) read(conn net.Conn, buf []byte) error {
+	if err := conn.SetReadDeadline(time.Now().Add(r.timeout)); err != nil {
+		return err
+	}
+	if _, err := io.ReadFull(conn, buf); err != nil {
+		return err
+	}
+	return nil
+}
+
+func (r RSocks) lookupIP(host string) (net.IP, error) {
 	addrs, err := net.LookupIP(host)
 	if err != nil {
 		return nil, err
 	}
-	switch version {
-	case SOCKS4:
+	switch r.version {
+	case Socks4:
 		var ip net.IP
 		for _, addr := range addrs {
 			ip = addr.To4()
@@ -175,18 +388,12 @@ func lookupIP(host string, version socksVersion) (net.IP, error) {
 			}
 		}
 		if ip == nil {
-			return nil, errors.New("cannot use IPv6 IP for SOCKS4")
+			return nil, errors.New("cannot use IPv6 IP for Socks4")
 		}
 		return ip, nil
 	default:
 		return addrs[0], nil
 	}
-}
-
-func calculateTimeout(timeout time.Duration) time.Duration {
-	millis := float64(timeout) / float64(time.Millisecond)
-	duration := time.Duration(millis) * time.Millisecond
-	return duration / 3 // dialer, read, write deadline
 }
 
 func splitHostPort(address string) (string, int, error) {
@@ -216,7 +423,7 @@ func validateProxyAddress(address string) error {
 		return err
 	}
 
-	if 1 > portnum || portnum > 0xffff {
+	if 1 > portnum || portnum > 65535 {
 		return fmt.Errorf("%s: %w", address, portOutOfRangeError)
 	}
 
