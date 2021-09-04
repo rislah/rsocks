@@ -29,7 +29,6 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	fmt.Println(socks)
 	tr := &http.Transport{
 		DialContext: socks.Dialer(),
 	}
@@ -178,15 +177,15 @@ func New(address string, timeout time.Duration, version socksVersion) (RSocks, e
 	}, nil
 }
 
-func (r RSocks) SetUsername(username string) {
+func (r *RSocks) SetUsername(username string) {
 	r.username = username
 }
 
-func (r RSocks) SetPassword(password string) {
+func (r *RSocks) SetPassword(password string) {
 	r.password = password
 }
 
-func (r RSocks) SetSocks5AddressType(addrType socks5AddressType) {
+func (r *RSocks) SetSocks5AddressType(addrType socks5AddressType) {
 	r.addressType = addrType
 }
 
@@ -241,19 +240,12 @@ func (r RSocks) socks4Connect(conn net.Conn, reqAddr string) error {
 	request = append(request, ip[0], ip[1], ip[2], ip[3])
 	request = append(request, 0) // userid
 
-	if err := conn.SetWriteDeadline(time.Now().Add(r.timeout)); err != nil {
-		return err
-	}
-	if _, err = conn.Write(request); err != nil {
-		return err
-	}
-
-	if err := conn.SetReadDeadline(time.Now().Add(r.timeout)); err != nil {
+	if err := r.write(conn, request); err != nil {
 		return err
 	}
 
 	request = request[:8]
-	if _, err = io.ReadFull(conn, request); err != nil {
+	if err := r.read(conn, request); err != nil {
 		return err
 	}
 
@@ -331,10 +323,6 @@ func (r RSocks) socks5Connect(conn net.Conn, reqAddr string) error {
 		connectionRequest = append(connectionRequest, 5, 1, 0, 1)                 // version, connect, authtype, domaintype
 		connectionRequest = append(connectionRequest, ip[0], ip[1], ip[2], ip[3]) //  ip
 		connectionRequest = append(connectionRequest, byte(port>>8), byte(port))  // big endian port
-	}
-
-	if len(connectionRequest) == 0 {
-		return nil
 	}
 
 	if err := r.write(conn, connectionRequest); err != nil {
